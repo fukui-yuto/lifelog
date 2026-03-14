@@ -1,0 +1,17 @@
+# Runtime data
+data/
+
+# Pipenv
+Pipfile.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
