@@ -1,4 +1,5 @@
 import json
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -88,10 +89,20 @@ DEFAULT = {
 
 _cache: dict | None = None
 _cache_mtime: float = 0.0
+_last_mtime_check: float = 0.0
+_MTIME_CHECK_INTERVAL = 5.0  # seconds between stat() calls
 
 
 def load() -> dict:
-    global _cache, _cache_mtime
+    global _cache, _cache_mtime, _last_mtime_check
+
+    # Return cached value without stat() if checked recently
+    now = time.monotonic()
+    if _cache is not None and (now - _last_mtime_check) < _MTIME_CHECK_INTERVAL:
+        return _cache
+
+    _last_mtime_check = now
+
     if not CATEGORIES_PATH.exists():
         CATEGORIES_PATH.write_text(
             json.dumps(DEFAULT, ensure_ascii=False, indent=2), encoding="utf-8"

@@ -201,6 +201,15 @@
     a:hover { text-decoration: underline; }
     ::-webkit-scrollbar { width: 5px; height: 5px; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* Analysis tab */
+    .analysis-layout { flex: 1; display: flex; flex-direction: column; gap: 10px; overflow: hidden; min-height: 0; }
+    .analysis-mid { display: flex; gap: 10px; height: 200px; flex-shrink: 0; }
+    .analysis-mid .panel { min-height: 0; }
+    .streak-value { font-size: 28px; font-weight: 700; color: #f59e0b; line-height: 1; margin-top: 4px; }
+    .streak-today { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 8px; margin-top: 3px; }
+    .streak-today.done { background: #10b98122; color: #10b981; }
+    .streak-today.pending { background: var(--border); color: var(--text2); }
   </style>
 </head>
 <body>
@@ -218,6 +227,7 @@
     <button class="tab-btn active" data-tab="today">今日<span class="kbd">1</span></button>
     <button class="tab-btn" data-tab="weekly">週間<span class="kbd">2</span></button>
     <button class="tab-btn" data-tab="heatmap">ヒートマップ<span class="kbd">3</span></button>
+    <button class="tab-btn" data-tab="analysis">分析<span class="kbd">4</span></button>
   </div>
 
   <div class="header-right">
@@ -234,7 +244,7 @@
       <div class="stat-card">
         <div class="stat-label">アクティブ時間</div>
         <div class="stat-value" id="s-total">--</div>
-        <div class="stat-sub" id="s-sess-sub">-- セッション</div>
+        <div class="stat-sub" id="s-sess-sub">-- 切り替え</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">フォーカス率</div>
@@ -338,6 +348,54 @@
     </div>
   </div>
 
+  <!-- ===== ANALYSIS ===== -->
+  <div class="tab-content" id="tab-analysis">
+    <div class="analysis-layout">
+      <!-- Stats row -->
+      <div class="stats-row" style="flex-shrink:0">
+        <div class="stat-card">
+          <div class="stat-label">今月のアクティブ</div>
+          <div class="stat-value" id="m-total">--</div>
+          <div class="stat-sub" id="m-days">-- 日間</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">1日平均</div>
+          <div class="stat-value" id="m-avg">--</div>
+          <div class="stat-sub">アクティブ時間/日</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">今月フォーカス率</div>
+          <div class="stat-value" id="m-focus">--%</div>
+          <div class="focus-bar"><div class="focus-bar-fill" id="m-focus-fill" style="width:0"></div></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">連続作業日数 🔥</div>
+          <div class="streak-value" id="streak-cur">--</div>
+          <div class="stat-sub" id="streak-long">最長記録 -- 日</div>
+          <div class="streak-today pending" id="streak-today">今日 未達成</div>
+        </div>
+      </div>
+
+      <!-- Hourly chart + Monthly legend -->
+      <div class="analysis-mid">
+        <div class="panel" style="flex:1;display:flex;flex-direction:column">
+          <div class="panel-title">時間帯別活動 — <span id="hourly-date-lbl" style="font-weight:400;text-transform:none;letter-spacing:0;color:var(--text)"></span></div>
+          <div class="chart-wrap" style="flex:1;min-height:0;position:relative"><canvas id="hourly-chart"></canvas></div>
+        </div>
+        <div class="panel" style="width:190px;flex-shrink:0;display:flex;flex-direction:column">
+          <div class="panel-title">今月カテゴリ</div>
+          <div class="legend" id="monthly-legend" style="overflow-y:auto;flex:1"></div>
+        </div>
+      </div>
+
+      <!-- Trend chart -->
+      <div class="panel" style="flex:1;min-height:0;display:flex;flex-direction:column">
+        <div class="panel-title">フォーカス率トレンド（直近12週）</div>
+        <div class="chart-wrap" style="flex:1;min-height:0;position:relative"><canvas id="trend-chart"></canvas></div>
+      </div>
+    </div>
+  </div>
+
 </main>
 
 <!-- Detail panel -->
@@ -428,9 +486,10 @@ document.querySelectorAll('.tab-btn').forEach(b => b.onclick = () => {
   switchTab(b.dataset.tab);
 });
 function loadCurrentTab() {
-  if      (currentTab === 'today')   loadToday();
-  else if (currentTab === 'weekly')  loadWeekly();
-  else if (currentTab === 'heatmap') loadHeatmap();
+  if      (currentTab === 'today')    loadToday();
+  else if (currentTab === 'weekly')   loadWeekly();
+  else if (currentTab === 'heatmap')  loadHeatmap();
+  else if (currentTab === 'analysis') loadAnalysis();
 }
 
 // ================================================================
@@ -448,12 +507,24 @@ document.getElementById('theme-btn').onclick = () => {
 };
 
 // ================================================================
-// API
+// API (with client-side cache for non-today requests)
 // ================================================================
+const _apiCache = new Map();
+const _API_CACHE_TTL = 60_000; // 1 minute
+
 async function api(path) {
+  const now = Date.now();
+  // Don't cache requests that contain today's date (live data)
+  const skipCache = path.includes(todayStr()) || path.includes('/api/streak');
+  if (!skipCache) {
+    const hit = _apiCache.get(path);
+    if (hit && now - hit.ts < _API_CACHE_TTL) return hit.data;
+  }
   const r = await fetch(path);
   if (!r.ok) throw new Error(`${r.status} ${path}`);
-  return r.json();
+  const data = await r.json();
+  if (!skipCache) _apiCache.set(path, { data, ts: now });
+  return data;
 }
 
 // ================================================================
@@ -482,7 +553,8 @@ async function loadToday() {
 
 function updateStats(cat, sess) {
   document.getElementById('s-total').textContent    = fmtS(cat.total_active_s || 0);
-  document.getElementById('s-sess-sub').textContent = sess.length + ' セッション';
+  const activeSess = sess.filter(s => !s.idle).length;
+  document.getElementById('s-sess-sub').textContent = activeSess + ' 切り替え';
   document.getElementById('s-focus').textContent    = (cat.focus_score || 0) + '%';
   document.getElementById('focus-fill').style.width = (cat.focus_score || 0) + '%';
 
@@ -902,9 +974,10 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft')  { navDate(-1); return; }
   if (e.key === 'ArrowRight') { navDate(1);  return; }
   if (e.key === 't') { setDate(todayStr()); return; }
-  if (e.key === '1') { switchTab('today');   return; }
-  if (e.key === '2') { switchTab('weekly');  return; }
-  if (e.key === '3') { switchTab('heatmap'); return; }
+  if (e.key === '1') { switchTab('today');    return; }
+  if (e.key === '2') { switchTab('weekly');   return; }
+  if (e.key === '3') { switchTab('heatmap');  return; }
+  if (e.key === '4') { switchTab('analysis'); return; }
   if (e.key === 'Escape') closeDetail();
 });
 
@@ -915,6 +988,169 @@ document.addEventListener('keydown', e => {
   document.getElementById(id).addEventListener('input', () => renderTable(sessions))
 );
 document.getElementById('f-cat').addEventListener('change', () => renderTable(sessions));
+
+// ================================================================
+// ANALYSIS
+// ================================================================
+async function loadAnalysis() {
+  try {
+    const [hourly, monthly, trend, streak] = await Promise.all([
+      api(`/api/hourly?date=${currentDate}`),
+      api(`/api/monthly?date=${currentDate}`),
+      api(`/api/trend?date=${currentDate}&weeks=12`),
+      api('/api/streak'),
+    ]);
+    renderMonthlyStats(monthly);
+    renderStreak(streak);
+    renderHourly(hourly);
+    renderMonthlyLegend(monthly);
+    renderTrend(trend);
+  } catch(e) { console.error('loadAnalysis:', e); }
+}
+
+function renderMonthlyStats(data) {
+  document.getElementById('m-total').textContent = fmtS(data.total_s || 0);
+  document.getElementById('m-days').textContent  = `${data.days_active} 日間`;
+  document.getElementById('m-avg').textContent   = fmtS(data.avg_daily_s || 0);
+  const f = data.avg_focus_score || 0;
+  document.getElementById('m-focus').textContent       = f + '%';
+  document.getElementById('m-focus-fill').style.width  = f + '%';
+}
+
+function renderStreak(data) {
+  document.getElementById('streak-cur').textContent  = data.current_streak + ' 日';
+  document.getElementById('streak-long').textContent = `最長記録 ${data.longest_streak} 日`;
+  const todayEl = document.getElementById('streak-today');
+  if (data.today_achieved) {
+    todayEl.textContent = '今日 達成 ✓';
+    todayEl.className   = 'streak-today done';
+  } else {
+    todayEl.textContent = '今日 未達成';
+    todayEl.className   = 'streak-today pending';
+  }
+}
+
+function renderHourly(data) {
+  document.getElementById('hourly-date-lbl').textContent = fmtDateLabel(currentDate);
+
+  const catKeys = Object.keys(data.labels).filter(k =>
+    data.hours.some(h => (h.categories[k] || 0) > 0)
+  );
+  const textColor = theme === 'dark' ? '#94a3b8' : '#64748b';
+  const gridColor = theme === 'dark' ? '#1e2a3a44' : '#e2e8f044';
+
+  if (charts.hourly) charts.hourly.destroy();
+  charts.hourly = new Chart(document.getElementById('hourly-chart'), {
+    type: 'bar',
+    data: {
+      labels: data.hours.map(h => h.hour + ':00'),
+      datasets: catKeys.map(k => ({
+        label:           data.labels[k].label,
+        data:            data.hours.map(h => h.categories[k] || 0),
+        backgroundColor: (data.labels[k].color || '#4b607a') + 'cc',
+        borderColor:     data.labels[k].color || '#4b607a',
+        borderWidth: 1, borderRadius: 2,
+      }))
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'top', labels: { color: textColor, font: {size:10}, boxWidth: 10, padding: 8 } },
+        tooltip: { callbacks: { label: c => ` ${c.dataset.label}: ${fmtS(c.raw)}` } }
+      },
+      scales: {
+        x: { stacked: true, ticks: { color: textColor, font: {size:9} }, grid: { color: gridColor } },
+        y: { stacked: true, ticks: { callback: v => fmtS(v), color: textColor, font: {size:9} }, grid: { color: gridColor } }
+      }
+    }
+  });
+}
+
+function renderMonthlyLegend(data) {
+  const entries = Object.entries(data.categories)
+    .filter(([, v]) => v.total_s > 0)
+    .sort((a, b) => b[1].total_s - a[1].total_s);
+  document.getElementById('monthly-legend').innerHTML = entries.map(([, v]) => `
+    <div class="legend-item">
+      <div class="legend-dot" style="background:${v.color}"></div>
+      <span class="legend-name">${escHtml(v.label)}</span>
+      <span class="legend-time">${fmtS(v.total_s)}</span>
+    </div>`).join('');
+}
+
+function renderTrend(data) {
+  const textColor = theme === 'dark' ? '#94a3b8' : '#64748b';
+  const gridColor = theme === 'dark' ? '#1e2a3a44' : '#e2e8f044';
+
+  // Only show dates that have data for cleaner chart
+  const validIdx = data.dates.map((_, i) => i).filter(i => data.total_active_s[i] > 0);
+  const labels   = validIdx.map(i => fmtDateLabel(data.dates[i]));
+  const focuses  = validIdx.map(i => data.focus_scores[i]);
+  const actives  = validIdx.map(i => data.total_active_s[i]);
+
+  if (charts.trend) charts.trend.destroy();
+  charts.trend = new Chart(document.getElementById('trend-chart'), {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          type: 'line',
+          label: 'フォーカス率',
+          data: focuses,
+          borderColor: '#10b981',
+          backgroundColor: '#10b98122',
+          tension: 0.3,
+          pointRadius: 2,
+          yAxisID: 'yPct',
+          spanGaps: true,
+        },
+        {
+          type: 'bar',
+          label: 'アクティブ時間',
+          data: actives,
+          backgroundColor: '#3b82f633',
+          borderColor: '#3b82f666',
+          borderWidth: 1,
+          borderRadius: 2,
+          yAxisID: 'yTime',
+        }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'top', labels: { color: textColor, font: {size:11}, boxWidth: 11, padding: 10 } },
+        tooltip: { callbacks: {
+          label: c => c.dataset.yAxisID === 'yPct'
+            ? ` フォーカス率: ${c.raw ?? '--'}%`
+            : ` アクティブ: ${fmtS(c.raw)}`
+        }}
+      },
+      scales: {
+        x: { ticks: { color: textColor, font: {size:9}, maxRotation: 45 }, grid: { color: gridColor } },
+        yTime: {
+          position: 'left',
+          ticks: { callback: v => fmtS(v), color: textColor, font: {size:9} },
+          grid: { color: gridColor },
+        },
+        yPct: {
+          position: 'right',
+          min: 0, max: 100,
+          ticks: { callback: v => v + '%', color: '#10b981', font: {size:9} },
+          grid: { display: false },
+        }
+      },
+      onClick: (_, els) => {
+        if (els.length) {
+          const idx = validIdx[els[0].index];
+          setDate(data.dates[idx]);
+          switchTab('today');
+        }
+      }
+    }
+  });
+}
 
 // ================================================================
 // AUTO REFRESH

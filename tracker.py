@@ -4,12 +4,12 @@ Polls the active window every second and writes sessions to lifelog.db.
 """
 
 import ctypes
+import http.client
 import json
 import os
 import time
 import sys
 import logging
-import urllib.request
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -118,6 +118,31 @@ def get_active_window() -> tuple[str, str]:
         return "(error)", ""
 
 
+# Persistent HTTP connections for Chrome DevTools Protocol (reused each poll cycle)
+_cdp_conns: dict[int, http.client.HTTPConnection | None] = {}
+
+
+def _fetch_cdp_tabs(port: int) -> list | None:
+    """Fetch tab list from Chrome DevTools using a persistent HTTP connection."""
+    conn = _cdp_conns.get(port)
+    try:
+        if conn is None:
+            conn = http.client.HTTPConnection("localhost", port, timeout=URL_TIMEOUT)
+            _cdp_conns[port] = conn
+        conn.request("GET", "/json")
+        resp = conn.getresponse()
+        body = resp.read()
+        return json.loads(body)
+    except Exception:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+        _cdp_conns[port] = None
+        return None
+
+
 def get_browser_url(app_name: str, win_title: str) -> str | None:
     """Get active tab URL via Chrome DevTools Protocol (CDP).
     Matches window title against tab titles to find the correct tab.
@@ -136,30 +161,25 @@ def get_browser_url(app_name: str, win_title: str) -> str | None:
 
     ports = [9222, 9223]  # Chrome=9222, Edge=9223
     for port in ports:
-        try:
-            resp = urllib.request.urlopen(
-                f"http://localhost:{port}/json",
-                timeout=URL_TIMEOUT,
-            )
-            tabs = json.loads(resp.read())
-            pages = [t for t in tabs if t.get("type") == "page"]
-
-            # タイトル完全一致で検索
-            for tab in pages:
-                if tab.get("title", "") == page_title:
-                    url = tab.get("url", "")
-                    if url.startswith("http"):
-                        return url
-
-            # 完全一致なければ部分一致で検索
-            for tab in pages:
-                if page_title and page_title.lower() in tab.get("title", "").lower():
-                    url = tab.get("url", "")
-                    if url.startswith("http"):
-                        return url
-
-        except Exception:
+        tabs = _fetch_cdp_tabs(port)
+        if tabs is None:
             continue
+        pages = [t for t in tabs if t.get("type") == "page"]
+
+        # タイトル完全一致で検索
+        for tab in pages:
+            if tab.get("title", "") == page_title:
+                url = tab.get("url", "")
+                if url.startswith("http"):
+                    return url
+
+        # 完全一致なければ部分一致で検索
+        for tab in pages:
+            if page_title and page_title.lower() in tab.get("title", "").lower():
+                url = tab.get("url", "")
+                if url.startswith("http"):
+                    return url
+
     return None
 
 

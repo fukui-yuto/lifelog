@@ -25,6 +25,7 @@ def init_db():
             idle        INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
+        CREATE INDEX IF NOT EXISTS idx_sessions_started_idle ON sessions(started_at, idle);
     """)
     con.commit()
     con.close()
@@ -167,6 +168,56 @@ def get_heatmap_data(start_date: str, end_date: str) -> list[dict]:
     """, (start_date, end_date)).fetchall()
     con.close()
     return [{"date": r[0], "total_s": max(0, r[1] or 0)} for r in rows]
+
+
+def get_hourly(target_date: str) -> list[dict]:
+    """Returns per-hour (app_name, url, total_s) for the given date, active sessions only."""
+    con = _connect(read_only=True)
+    rows = con.execute("""
+        SELECT
+            CAST(strftime('%H', started_at) AS INTEGER) AS hour,
+            app_name, url,
+            SUM(CAST((julianday(ended_at) - julianday(started_at)) * 86400 AS INTEGER)) AS total_s
+        FROM sessions
+        WHERE date(started_at) = ? AND idle = 0
+        GROUP BY hour, app_name, url
+        ORDER BY hour
+    """, (target_date,)).fetchall()
+    con.close()
+    return [{"hour": r[0], "app_name": r[1], "url": r[2], "total_s": max(1, r[3] or 0)} for r in rows]
+
+
+def get_monthly(year_month: str) -> list[dict]:
+    """Returns daily (date, app_name, url, total_s) for the given month (YYYY-MM)."""
+    con = _connect(read_only=True)
+    rows = con.execute("""
+        SELECT date(started_at) AS d, app_name, url,
+               SUM(CAST((julianday(ended_at) - julianday(started_at)) * 86400 AS INTEGER)) AS total_s
+        FROM sessions
+        WHERE strftime('%Y-%m', started_at) = ? AND idle = 0
+        GROUP BY d, app_name, url
+        ORDER BY d
+    """, (year_month,)).fetchall()
+    con.close()
+    return [{"date": r[0], "app_name": r[1], "url": r[2], "total_s": max(1, r[3] or 0)} for r in rows]
+
+
+def get_all_daily_totals() -> list[dict]:
+    """Returns (date, app_name, url, total_s) grouped by day for streak/trend calculations.
+    Limited to last 730 days to keep performance fast."""
+    from datetime import date, timedelta
+    cutoff = (date.today() - timedelta(days=730)).isoformat()
+    con = _connect(read_only=True)
+    rows = con.execute("""
+        SELECT date(started_at) AS d, app_name, url,
+               SUM(CAST((julianday(ended_at) - julianday(started_at)) * 86400 AS INTEGER)) AS total_s
+        FROM sessions
+        WHERE date(started_at) >= ? AND idle = 0
+        GROUP BY d, app_name, url
+        ORDER BY d
+    """, (cutoff,)).fetchall()
+    con.close()
+    return [{"date": r[0], "app_name": r[1], "url": r[2], "total_s": max(1, r[3] or 0)} for r in rows]
 
 
 def get_ranking(target_date: str, limit: int = 10) -> list[dict]:

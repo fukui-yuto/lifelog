@@ -143,6 +143,166 @@ def api_ranking(date: str, limit: int = 10):
     return rows
 
 
+@app.get("/api/hourly")
+def api_hourly(date: str):
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+
+    rows = db.get_hourly(date)
+    all_cats = cats.all_labels()
+
+    hours: dict[int, dict[str, int]] = {h: {} for h in range(24)}
+    for r in rows:
+        cat = cats.classify(r["app_name"], r.get("url"))
+        h = r["hour"]
+        hours[h][cat] = hours[h].get(cat, 0) + r["total_s"]
+
+    return {
+        "hours": [{"hour": h, "categories": hours[h]} for h in range(24)],
+        "labels": {k: {"label": v["label"], "color": v["color"]} for k, v in all_cats.items()},
+    }
+
+
+@app.get("/api/trend")
+def api_trend(date: str, weeks: int = 12):
+    try:
+        d = datetime.strptime(date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+
+    end = d
+    start = end - timedelta(weeks=min(weeks, 52))
+    rows = db.get_summary_range(start.isoformat(), end.isoformat())
+    all_cats = cats.all_labels()
+
+    day_cats: dict[str, dict[str, int]] = {}
+    for row in rows:
+        day = row["date"]
+        cat = cats.classify(row["app_name"], None)
+        if day not in day_cats:
+            day_cats[day] = {}
+        day_cats[day][cat] = day_cats[day].get(cat, 0) + row["total_s"]
+
+    dates = []
+    cur = start
+    while cur <= end:
+        dates.append(cur.isoformat())
+        cur += timedelta(days=1)
+
+    focus_scores = []
+    total_actives = []
+    cat_series: dict[str, list[int]] = {k: [] for k in all_cats}
+    for day in dates:
+        dc = day_cats.get(day, {})
+        total = sum(dc.values())
+        work = dc.get("work", 0)
+        focus_scores.append(round(work / total * 100) if total > 0 else None)
+        total_actives.append(total)
+        for k in all_cats:
+            cat_series[k].append(dc.get(k, 0))
+
+    return {
+        "dates": dates,
+        "focus_scores": focus_scores,
+        "total_active_s": total_actives,
+        "categories": cat_series,
+        "labels": {k: {"label": v["label"], "color": v["color"]} for k, v in all_cats.items()},
+    }
+
+
+@app.get("/api/monthly")
+def api_monthly(date: str):
+    try:
+        d = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+
+    year_month = d.strftime("%Y-%m")
+    rows = db.get_monthly(year_month)
+    all_cats = cats.all_labels()
+
+    cat_totals: dict[str, int] = {}
+    day_totals: dict[str, int] = {}
+    for r in rows:
+        cat = cats.classify(r["app_name"], r.get("url"))
+        cat_totals[cat] = cat_totals.get(cat, 0) + r["total_s"]
+        day_totals[r["date"]] = day_totals.get(r["date"], 0) + r["total_s"]
+
+    days_active = len(day_totals)
+    total_s = sum(cat_totals.values())
+    avg_daily_s = round(total_s / days_active) if days_active > 0 else 0
+    work_s = cat_totals.get("work", 0)
+    avg_focus = round(work_s / total_s * 100) if total_s > 0 else 0
+
+    return {
+        "year_month": year_month,
+        "days_active": days_active,
+        "total_s": total_s,
+        "avg_daily_s": avg_daily_s,
+        "avg_focus_score": avg_focus,
+        "categories": {
+            k: {"total_s": cat_totals.get(k, 0), "label": v["label"], "color": v["color"]}
+            for k, v in all_cats.items()
+        },
+    }
+
+
+@app.get("/api/streak")
+def api_streak(category: str = "work", min_hours: float = 1.0):
+    from datetime import date as date_cls, timedelta as td
+    rows = db.get_all_daily_totals()
+    min_s = int(min_hours * 3600)
+
+    day_cats: dict[str, dict[str, int]] = {}
+    for r in rows:
+        day = r["date"]
+        cat = cats.classify(r["app_name"], r.get("url"))
+        if day not in day_cats:
+            day_cats[day] = {}
+        day_cats[day][cat] = day_cats[day].get(cat, 0) + r["total_s"]
+
+    today = date_cls.today().isoformat()
+
+    # Longest streak
+    longest_streak = 0
+    temp = 1
+    prev_d = None
+    for day in sorted(day_cats.keys()):
+        achieved = day_cats[day].get(category, 0) >= min_s
+        if not achieved:
+            prev_d = None
+            continue
+        cur_d = date_cls.fromisoformat(day)
+        if prev_d is not None and (cur_d - prev_d).days == 1:
+            temp += 1
+        else:
+            temp = 1
+        longest_streak = max(longest_streak, temp)
+        prev_d = cur_d
+
+    # Current streak (count backwards from today)
+    today_achieved = day_cats.get(today, {}).get(category, 0) >= min_s
+    current_streak = 0
+    check = date_cls.today() if today_achieved else date_cls.today() - td(days=1)
+    while True:
+        d_str = check.isoformat()
+        if day_cats.get(d_str, {}).get(category, 0) >= min_s:
+            current_streak += 1
+            check -= td(days=1)
+        else:
+            break
+
+    return {
+        "category": category,
+        "min_hours": min_hours,
+        "current_streak": current_streak,
+        "longest_streak": longest_streak,
+        "today_achieved": today_achieved,
+    }
+
+
 @app.get("/api/export/csv")
 def api_export_csv(date: str):
     try:
